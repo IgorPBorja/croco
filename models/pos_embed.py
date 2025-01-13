@@ -104,8 +104,13 @@ def interpolate_pos_embed(model, checkpoint_model):
 try:
     from models.curope import cuRoPE2D
     RoPE2D = cuRoPE2D
+    print("Warning: not using inference-time context expansion in the RoPE embeddings (detailed in https://github.com/naver/dust3r/issues/62)")
 except ImportError:
     print('Warning, cannot find cuda-compiled version of RoPE2D, using a slow pytorch version instead')
+    raise NotImplementedError(
+        "Python implementation is not yet compatible with inference-time context expansion in the RoPE embeddings. "
+        "Please use the precompiled CUDA kernels"
+    )
 
     class RoPE2D(torch.nn.Module):
         

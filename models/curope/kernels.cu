@@ -3,6 +3,8 @@
   Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 */
 
+#include <utility>
+#include <string>
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -13,6 +15,58 @@
     TORCH_CHECK((tensor).is_contiguous(), #tensor " is not contiguous"); }
 void CHECK_KERNEL() {auto error = cudaGetLastError(); TORCH_CHECK( error == cudaSuccess, cudaGetErrorString(error));}
 
+#ifndef INTERNAL_RES
+    #error "Internal resolution (largest image side when reconstructing) should be explicitly defined, even when using default of 512"
+#endif
+#ifndef INPUT_IMAGE_SIZE
+    #error "Input image size should be defined (comma separated integers, like '1,2', for width and height)"
+#endif
+
+// in normal circunstances we have the number of patches be (512, X) (resized image) divided by (16, 16) (patch size) 
+// --> (32, X / 16) = 2X tokens (when flattened)
+// However, if the largest image size is now W, then number of patches will be
+// (W / 16) * (X * (W/512) / 16) = (W/512)^2 * 512 /16^2 * X = (W/512)^2 * 2X =: N
+// Since we want new context window to be N instead of 2X
+// the ratio between original context window and new context window (to expand RoPE) is (512 / W)^2 
+constexpr int BASE_RES = 512;
+constexpr int LARGEST_SIDE = INTERNAL_RES;
+
+constexpr float _resolution_ratio = ((float)BASE_RES) / ((float)INTERNAL_RES);
+constexpr float context_ratio = _resolution_ratio * _resolution_ratio;
+
+constexpr std::pair<int, int> parse_image_size(){
+    int w = 0, h = 0;
+    bool found_comma = false;
+    std::string_view _view(INPUT_IMAGE_SIZE);
+    for (char c: _view){
+        if (c == ','){
+            found_comma = true;
+        } else if (found_comma){
+            h = (h * 10) + (c - '0');
+        } else {
+            w = (w * 10) + (c - '0');
+        }
+    }
+    return std::make_pair(w, h);
+}
+
+constexpr int get_expected_num_tokens(){
+    constexpr int PATCH_SIZE = 16;
+    constexpr int W = parse_image_size().first;
+    constexpr int H = parse_image_size().second;
+
+    // smallest side is LARGEST_SIDE * min(W, H) / max(W, H)
+    // if (W <= H){
+    //     static_assert(((LARGEST_SIDE * W) % H) == 0);
+    // } else {
+    //     static_assert(((LARGEST_SIDE * H) % W) == 0);
+    // }
+    constexpr int SMALLEST_SIDE = (W <= H) ? (LARGEST_SIDE * W) / H : (LARGEST_SIDE * H) / W;
+    static_assert(LARGEST_SIDE % PATCH_SIZE == 0, "Largest side of internal resolution not divisible by patch size");
+    static_assert(SMALLEST_SIDE % PATCH_SIZE == 0, "Smallest side of internal resolution not divisible by patch size");
+    constexpr int EXPECTED_NUM_TOKENS = (LARGEST_SIDE / PATCH_SIZE) * (SMALLEST_SIDE / PATCH_SIZE);
+    return EXPECTED_NUM_TOKENS;
+}
 
 template < typename scalar_t  >
 __global__ void rope_2d_cuda_kernel( 
@@ -50,7 +104,7 @@ __global__ void rope_2d_cuda_kernel(
     const int m = (X*D/2) + (threadIdx.x % Q);   // index of u_Y or u_X
 
     // grab the cos,sin appropriate for me
-    const float freq = pos[blockIdx.x*2+X] * shared_inv_freq[threadIdx.x % Q];
+    const float freq = (pos[blockIdx.x*2+X] * shared_inv_freq[threadIdx.x % Q]) / context_ratio;
     const float cos = cosf(freq);
     const float sin = sinf(freq);
     /*
@@ -92,6 +146,8 @@ void rope_2d_cuda( torch::Tensor tokens, const torch::Tensor pos, const float ba
     TORCH_CHECK(pos.is_contiguous(), "positions are not contiguous");
     TORCH_CHECK(pos.size(0) == B && pos.size(1) == N && pos.size(2) == 2, "bad pos.shape");
     TORCH_CHECK(D % 4 == 0, "token dim must be multiple of 4");
+
+    TORCH_CHECK(N == get_expected_num_tokens(), "Unexpected number of tokens " + std::to_string(N) + ", expected" + std::to_string(get_expected_num_tokens()));
 
     // one block for each layer, one thread per local-max
     const int THREADS_PER_BLOCK = D;
