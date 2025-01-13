@@ -68,6 +68,8 @@ constexpr int get_expected_num_tokens(){
     return EXPECTED_NUM_TOKENS;
 }
 
+constexpr int EXPECTED_NUM_TOKENS = get_expected_num_tokens();
+
 template < typename scalar_t  >
 __global__ void rope_2d_cuda_kernel( 
         //scalar_t* __restrict__ tokens, 
@@ -104,7 +106,7 @@ __global__ void rope_2d_cuda_kernel(
     const int m = (X*D/2) + (threadIdx.x % Q);   // index of u_Y or u_X
 
     // grab the cos,sin appropriate for me
-    const float freq = (pos[blockIdx.x*2+X] * shared_inv_freq[threadIdx.x % Q]) / context_ratio;
+    const float freq = (pos[blockIdx.x*2+X] * shared_inv_freq[threadIdx.x % Q]) * context_ratio;
     const float cos = cosf(freq);
     const float sin = sinf(freq);
     /*
@@ -146,8 +148,7 @@ void rope_2d_cuda( torch::Tensor tokens, const torch::Tensor pos, const float ba
     TORCH_CHECK(pos.is_contiguous(), "positions are not contiguous");
     TORCH_CHECK(pos.size(0) == B && pos.size(1) == N && pos.size(2) == 2, "bad pos.shape");
     TORCH_CHECK(D % 4 == 0, "token dim must be multiple of 4");
-
-    TORCH_CHECK(N == get_expected_num_tokens(), "Unexpected number of tokens " + std::to_string(N) + ", expected" + std::to_string(get_expected_num_tokens()));
+    TORCH_CHECK(N == EXPECTED_NUM_TOKENS, "Unexpected number of tokens " + std::to_string(N) + ", expected" + std::to_string(get_expected_num_tokens()));
 
     // one block for each layer, one thread per local-max
     const int THREADS_PER_BLOCK = D;
